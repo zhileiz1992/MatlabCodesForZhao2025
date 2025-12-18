@@ -1,0 +1,2 @@
+% calculate and plot the firing field of MO neurons in the acoustic space
+% step 1: obtain UMAP embedding and assign spikes to spectrogram sliding windows

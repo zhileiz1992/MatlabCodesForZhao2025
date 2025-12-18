@@ -1,0 +1,195 @@
+% build SVM decoders to quantify the overlap and divergence of call trajectories in VAE space
+% Zhilei, 08/07/2025
+
+clear; close all;
+
+addpath(genpath('/home/zz367/ProjectsU/EphysMONAO/Jupyter/MatlabCodes/ZZ_ephys_utils'));
+addpath(genpath('/home/zz367/ProjectsU/EphysMONAO/Jupyter/MatlabCodes/ZZ_acousticSpace/plotTraj'));
+
+
+%% Folder setting
+fd_z4 = '/mnt/z4';
+fd_base = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'Analyzed');
+birdID = 'pair5RigCCU29';
+pairID = 'pair5CU29CU55';
+% what syllable subtypes this bird has
+syls = {'v4', 'v5'};
+% syls = {'v1', 'v7'};
+% what's the window size
+win_frame = 32;
+% where is VAE/UMAP embedding located
+vae_run = 'traj_chop_32_1_32';
+fd_vae = fullfile(fd_base, 'vaeWav', birdID, 'Traj', 'applySylAll', sprintf('latents.%s', vae_run));
+fn_vae = fullfile(fd_vae, sprintf('%s.latents.%s.h5', birdID, vae_run));
+fn_info = fullfile(fd_vae, sprintf('%s.latents.%s.info.csv', birdID, vae_run));
+info = readtable(fn_info, 'Delimiter', ',');
+% where to save
+fd_save =  fullfile(fd_base, 'Figures', pairID, 'AcousticSpace', birdID, 'embed', 'SVM');
+if ~exist(fd_save, 'dir')
+  mkdir(fd_save);
+end
+fprintf('Save MMD results to %s\n', fd_save);
+
+
+%% 1. Retrieve VAE data
+% use data from batch1, since batch 2 may have calls from partner bird
+batch = {'batch1'};
+d_vae = ZZfunc_retrieveVAE_v1(fn_vae, info, batch, syls);
+  
+
+%% 2. Align the VAE time-series (32-dim trajectories): interpolate 
+% what's the mean length of VAE 
+vae_lens1 = cellfun(@(x) size(x,1), {d_vae{1}.vae});
+vae_lens2 = cellfun(@(x) size(x,1), {d_vae{2}.vae});
+mean_len = floor(mean([vae_lens1 vae_lens2]));
+fprintf('Intepolate to %d frames (ms)\n', mean_len);
+% loop through syllable types
+for si=1:size(syls,2)
+  d_syl = d_vae{si};
+  parfor ri=1:size(d_syl,2)
+    d = d_syl(ri).vae;
+    interp_d = ZZfunc_interp_window(d, mean_len);
+    d_syl(ri).vae_interp = interp_d;
+  end
+  d_vae{si} = d_syl;
+end
+% plot an example to check the alignment
+figure; 
+subplot(1, 2, 1);
+imagesc(d_vae{2}(105).vae); title('Original VAE');
+subplot(1, 2, 2);
+imagesc(d_vae{2}(105).vae_interp); title('Interpolated VAE');
+
+
+%% 3.1. SVM: with all input dimensions
+X1 = cat(3, d_vae{1}.vae_interp);
+X2 = cat(3, d_vae{2}.vae_interp);
+Y1 = repmat({syls{1}}, size(X1,3), 1);
+Y2 = repmat({syls{2}}, size(X2,3), 1);
+% determine the train/test split
+train_ratio = 0.5;
+num_total = min([size(X1,3), size(X2,3)]);
+num_train = floor(train_ratio*num_total);
+num_test = num_total - num_train;
+% split data into train and test
+r_seed = 1118;
+i_X1 = sample_subarrays(1:size(X1,3), [num_train, num_test], r_seed);
+i_X2 = sample_subarrays(1:size(X2,3), [num_train, num_test], r_seed);
+X_train = cat(3, X1(:,:,i_X1{1}), X2(:,:,i_X2{1}));
+y_train = [Y1(i_X1{1}); Y2(i_X2{1})];
+y_shuffle = y_train(randperm(numel(y_train)));
+X_test = cat(3, X1(:,:,i_X1{2}), X2(:,:,i_X2{2}));
+y_test = [Y1(i_X1{2}); Y2(i_X2{2})];
+% loop through time points
+% accu_all = cells(mean_len, 1);
+accu_all = [];
+parfor ti=1:mean_len
+  x_train = squeeze(X_train(ti, :, :))';
+  x_test = squeeze(X_test(ti, :, :))';
+  [~, accuracy] = trainSVM(x_train, y_train, x_test, y_test, 'linear');
+%   [model, accuracy] = trainLinearRegressionClassifier(x_train, y_train, x_test, y_test);
+  accu_all(ti).real = accuracy;
+  % also train on shuffled labels
+  [~, accuracy] = trainSVM(x_train, y_shuffle, x_test, y_test, 'linear');
+  accu_all(ti).shuffle = accuracy; 
+end
+
+
+%% 3.2 SVM: PCA first, then control the amount of input info
+X1 = cat(3, d_vae{1}.vae_interp);
+X2 = cat(3, d_vae{2}.vae_interp);
+% Sizes
+[n1_samp, n_feat, n1_ind] = size(X1);
+[n2_samp, ~,    n2_ind]  = size(X2);
+% Reshape: merge samples × individuals into one dimension
+X1_reshaped = reshape(permute(X1, [1 3 2]), n1_samp * n1_ind, n_feat);
+X2_reshaped = reshape(permute(X2, [1 3 2]), n2_samp * n2_ind, n_feat);
+% Concatenate and perform PCA
+X_all = [X1_reshaped; X2_reshaped];  % size: (n_total × n_feat)
+[coeff, score_all, latent] = pca(X_all);
+% Separate scores
+score1_flat = score_all(1 : n1_samp * n1_ind, :);
+score2_flat = score_all(n1_samp * n1_ind + 1 : end, :);
+% Number of PCs
+n_pcs = size(score_all, 2);
+% Reshape back: [samples × PCs × individuals]
+X1 = permute(reshape(score1_flat, n1_samp, n1_ind, n_pcs), [1 3 2]);
+X2 = permute(reshape(score2_flat, n2_samp, n2_ind, n_pcs), [1 3 2]);
+% plot the variance explained 
+figure; plot(1:size(latent,1), cumsum(latent)/sum(latent), '-bo', 'LineWidth', 2);
+xlabel('PC dims', 'FontSize', 14);
+ylabel('Variance explained', 'FontSize', 14);
+
+% partition into train/test
+X1 = cat(3, d_vae{1}.vae_interp);
+X2 = cat(3, d_vae{2}.vae_interp);
+Y1 = repmat({syls{1}}, size(X1,3), 1);
+Y2 = repmat({syls{2}}, size(X2,3), 1);
+% determine the train/test split
+train_ratio = 0.5;
+num_total = min([size(X1,3), size(X2,3)]);
+num_train = floor(train_ratio*num_total);
+num_test = num_total - num_train;
+% split data into train and test
+r_seed = 1118;
+i_X1 = sample_subarrays(1:size(X1,3), [num_train, num_test], r_seed);
+i_X2 = sample_subarrays(1:size(X2,3), [num_train, num_test], r_seed);
+X_train = cat(3, X1(:,:,i_X1{1}), X2(:,:,i_X2{1}));
+y_train = [Y1(i_X1{1}); Y2(i_X2{1})];
+y_shuffle = y_train(randperm(numel(y_train)));
+X_test = cat(3, X1(:,:,i_X1{2}), X2(:,:,i_X2{2}));
+y_test = [Y1(i_X1{2}); Y2(i_X2{2})];
+% loop through time points
+% accu_all = cells(mean_len, 1);
+accu_all = [];
+% how many PCs to use
+
+parfor ti=1:mean_len
+  x_train = squeeze(X_train(ti, :, :))';
+  x_test = squeeze(X_test(ti, :, :))';
+  [~, accuracy] = trainSVM(x_train, y_train, x_test, y_test, 'linear');
+%   [model, accuracy] = trainLinearRegressionClassifier(x_train, y_train, x_test, y_test);
+  accu_all(ti).real = accuracy;
+  % also train on shuffled labels
+  [~, accuracy] = trainSVM(x_train, y_shuffle, x_test, y_test, 'linear');
+  accu_all(ti).shuffle = accuracy; 
+end
+
+
+
+
+
+
+%% 4. Plot SVM accuracy
+close all;
+fig = ZZfunc_newFigurePDFsize_v1([10 10 600 400]);
+ax = gca;
+rel_t = (1:mean_len) - win_frame;
+% remove the baseline on accuracy
+baseline = 0.5; 
+hold(ax, 'on');
+plot(ax, rel_t, [accu_all.real], '-r', 'LineWidth', 3, 'DisplayName', sprintf('%s-%s', syls{1}, syls{2})); 
+plot(ax, rel_t, [accu_all.shuffle], 'Color', '#737373', 'LineWidth', 3, 'DisplayName', 'Shuffled'); 
+% add line for syllable start and end
+xline(ax, 0, 'LineStyle', '--', 'HandleVisibility', 'off');
+yline(ax, baseline, 'LineStyle', '--', 'HandleVisibility', 'off');
+% xline(ax, rel_t(end)-win_frame, 'LineStyle', '--', 'HandleVisibility', 'off');
+xlim(ax, [rel_t(1)-10 rel_t(end)+10]);
+% ylim(ax, [0.4 1]);
+legend('show', 'Location', 'best', 'FontSize', 12);
+xlabel('Relative time (ms)', 'FontSize', 16);
+ylabel('SVM accuracy', 'FontSize', 16);
+
+% save figure
+fn_pdf = fullfile(fd_save, sprintf('%s.%s.%s.svm.pdf', birdID, syls{1}, syls{2}));
+print(fig, fn_pdf, '-dpdf', '-painters');
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,142 @@
+% A script to extract interesting events from budgie Intan recordings
+% Then convert data to NC files so spikes can be sorted in electro_gui
+% Zhilei Zhao, 2024/10/28
+% modified to be a pipeline; deal with several pairs at the same time to avoid readings files twice
+% added the function of automatically create dbase
+% modified to also extract the playback channel
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Intan recording setup for a pair:
+% 1. Two budgies in a dyadic chamber
+% 2. Two directional mics record audio
+% 3. Videos (60fps) and audios (50k) are recorded by PyVAQ
+% 4. Another copy of audio (20k) are also recorded by Intan board adc
+% 5. One bird or both birds may have ephys recordings, each has 16 channels
+% 6. Each ephys recording has 3-channel accelerometer data
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Analysis goals:
+% 1. Focus on the audios in the Intan data, no need to deal with sync issue
+% 2. Start by finding all warble episodes, by either bird
+% 3. Then also find standalone contact calls outside warble
+% 4. Finally find gestures without vocalizations in the accelerometer data
+% (Wait for Han on this)
+% 5. Save these events into different subfolders, need to avoid redundancy
+
+close all; clear;
+addpath(genpath('/home/zz367/ProjectsU/EphysMONAO/Jupyter/MatlabCodes/'));
+addpath(genpath('/home/zz367/ProjectsU/WarbleAnalysis/Jupyter/MatlabCodes/ZZ_extractWarbleFromWav'));
+
+%% Input settings
+% Folder setting
+fd_z4 = '/mnt/z4';
+fd_base_intan = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'EphysData');
+fd_base_pyvaq = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'PyVAQData');
+fd_base_save = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'Analyzed', 'ExtractedIntan');
+fd_base_dbase = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'Analyzed', 'DbaseFiles');
+% Dataset setting
+meta.expID = 'CCU21';
+% bird ID in the order of ephys channels in the intan file, if only one bird is recorded, use '' for the other bird
+meta.birdID = {{'pair1RigCCU21', ''}, {'', ''}}; 
+meta.pairID = {'pair1CU21CUX', ''};
+meta.cam = {'CamD', 'CamE'};  % what camera for each pair
+meta.audio_ch_intan = [[4, 5]; [2, 3]];  % what audio channels for each bird in intan file, 1st AI channel of Intan is speaker copy
+meta.playback_ch_intan = 1; % what chann % what channel for all playback copies in intan
+meta.playback_ch_box = [1 1];  % what channel for the box-specific playback, no box-specific playback
+meta.trigger_ch_intan = 1;  % what channel for the trigger signal of pyVAQ
+meta.ephys_ch_list = {{1:16, []}, {[], []}}; % what ephys channel for these two birds in intan, [] if only one bird is recorded 
+meta.acc_ch_list = {{1:3, []}, {[], []}};  % what accelerometer channel for these two birds in intan
+meta.light_cycle = {'10:45:00', '23:15:00'}; % what time range to check for, ignore other time
+meta.fs_pyvaq = 50000;  % default pyvaq sampling rate
+meta.fs_intan = 20000;  % default intan sampling rate
+% what date to analyze 
+data_dates = {'2023-09-26', '2023-09-27', '2023-09-29', '2023-09-30', '2023-10-01', '2023-10-02', '2023-10-04', '2023-10-05', '2023-10-09', '2023-10-10', ...
+              '2023-10-16', '2023-10-17', '2023-10-19', '2023-10-20', '2023-10-21', '2023-10-22', '2023-10-23', '2023-10-24', '2023-10-28', '2023-10-29'};
+
+
+%% 1. Extract warble and standalone contact calls from Intan recordings
+% di = 1; 
+for di=1:length(data_dates)
+  data_date = data_dates{di};
+  % extract vocalizations first, differentiate warble and standalone calls, save as wav files
+  [warbleMetaAll, otherMetaAll] = ZZ_IdentifyWarbleFromIntan_v8(fd_base_intan, fd_base_save, data_date, meta);
+  % then export the ephys & accelerometer channels to nc files for each pair, for the warble first
+  for pi=1:length(meta.pairID)
+    if ~isempty(meta.pairID{pi})
+     [fds_save_nc] = ZZ_exportIntanNC_v3_pairs(warbleMetaAll, meta, pi, data_date, fd_base_save, 'warble');
+    end
+  end
+  % then for the calls
+  for pi=1:length(meta.pairID)
+     if ~isempty(meta.pairID{pi})
+      [fds_save_nc] = ZZ_exportIntanNC_v3_pairs(otherMetaAll, meta, pi, data_date, fd_base_save, 'other');
+     end
+  end
+end
+
+
+%% 2. Create the dbase using electro_gui as the starting point of analysis
+% use the ZZnew default setting
+% save as birdID.date.warble.start.dbase.mat
+addpath(genpath('/home/zz367/LabSoftware/ElectroGui'));
+addpath(genpath('/home/zz367/LabSoftware/MATLAB-utils'));
+cd('/home/zz367/LabSoftware/ElectroGui/source');
+% di = 1;
+for di=1:length(data_dates)
+data_date = data_dates{di};
+for pi=1:length(meta.pairID)
+  for bi=1:length(meta.birdID{pi})
+    if ~isempty(meta.birdID{pi}{bi})
+      fd_dbase = fullfile(fd_base_dbase, meta.pairID{pi}, data_date, meta.birdID{pi}{bi}, 'warble');
+      disp(fd_dbase);
+      % create a new folder to store the dbase
+      if ~exist(fd_dbase)
+        mkdir(fd_dbase)
+      end
+      % create the dbase
+      dataRootDir = fullfile(fd_base_save, meta.pairID{pi}, data_date, meta.birdID{pi}{bi}, 'NCFiles', 'warble');
+      savePath = fullfile(fd_dbase, sprintf('%s.%s.warble.start.dbase.mat', meta.birdID{pi}{bi}, strrep(data_date, '-','')));
+      dbase = electro_gui.CreateDbase(defaults_ZZmodern4, dataRootDir);
+      % replace the path name to Windows style, since sorting is done in Windows
+      newPath = ZZ_linuxPathToWin_v1(dbase.PathName, 'Y:', '\mnt\z4');
+      dbase.PathName = newPath;
+      % save dbase
+      save(savePath, 'dbase');
+      % also create an empty text file for selecting good warble
+      fn_txt = fullfile(fd_dbase, sprintf('%s.%s.warble.good.txt', meta.birdID{pi}{bi}, strrep(data_date, '-','')));
+      if ~exist(fn_txt)
+        fid = fopen(fn_txt, 'w'); fclose(fid);
+      end
+    end
+  end
+end
+end
+
+
+% 3. Mark good warble episodes
+% go through the WarbleWav folder, open in Audacity, choose good warble episodes for both focal and partner bird
+% save id in a txt file in the dbase folder: birdID.date.warble.good.txt 
+% mark the bGood property
+di = 2;
+data_date = data_dates{di};
+for pi=1:length(meta.pairID)
+  for bi=1:length(meta.birdID{pi})
+    if ~isempty(meta.birdID{pi}{bi})
+      fd_base = fullfile(fd_base_dbase, meta.pairID{pi}, data_date, meta.birdID{pi}{bi}, 'warble');
+      fn_dbase = fullfile(fd_base, sprintf('%s.%s.warble.start.dbase.mat', meta.birdID{pi}{bi}, strrep(data_date, '-','')));
+      fn_select = fullfile(fd_base, sprintf('%s.%s.warble.good.txt', meta.birdID{pi}{bi}, strrep(data_date, '-','')));
+      % subset
+      if exist(fn_dbase) && exist(fn_select)
+        [dbase_new, dbase_old] = ZZ_markGoodWarbleInDbaseFunc_v1(fn_dbase, fn_select);
+        fn_save = strrep(fn_dbase, 'start', 'good');
+        dbase = dbase_new;
+        save(fn_save, 'dbase');
+      end
+    end
+  end
+end
+
+
+    
+
+
+
+

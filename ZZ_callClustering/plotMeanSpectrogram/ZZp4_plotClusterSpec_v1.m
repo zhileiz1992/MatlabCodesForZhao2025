@@ -1,0 +1,220 @@
+% given call clustering results, plot spectrograms to check clustering quality
+
+clear; close all;
+
+
+%% Folder setting
+fd_z4 = '/mnt/z4';
+fd_home = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'Analyzed');
+fd_save_base = fullfile(fd_home, 'vaeWav');
+% what birds to extract
+birdIDs = {'pair5RigCCU29', 'pair4RigACU68', 'pair4RigBCU53', 'pair2RigBCU25'};
+pairIDs = {'pair5CU29CU55', 'pair4CU68CU53', 'pair4CU68CU53', 'pair2CU20CU25'};
+% what spectrogram input dataset
+input_rn = 'spec_goffinet_nn_256_176';
+% default color list
+col_list = {'#e41a1c','#a65628','#4daf4a','#984ea3','#ff7f00','#f781bf','#377eb8','#737373', '#5ab4ac','#ffff33'};
+syl = 'v';  % what syllable to focus on
+% what subfolder has the VAE/UMAP results
+% UMAP on VAE
+% fd_vae = 'UMAPonVAE1'; vae_run = 'spec_goffinet_nn_256_176';
+% fd_vae = 'UMAPonVAE2'; vae_run = 'cosine_leaf_0.05';  % what VAE/UMAP parameters run; 
+
+% UMAP on spectrogram
+fd_vae = 'UMAPonSpec3'; vae_run = 'UMAPonSpec.umicorrelation_umd0_hsleaf';
+
+
+% loop through birds
+bi = 4;
+bd = birdIDs{bi};
+% where to save results
+fd_save = fullfile(fd_save_base, bd, fd_vae, syl, vae_run, 'plots');
+if ~exist(fd_save, 'dir')
+  mkdir(fd_save);
+end
+disp(fd_save);
+
+
+%% 1. Read the embedding data
+% load the embedding file
+% fn_embed = fullfile(fd_save_base, bd, fd_vae, syl, input_rn, sprintf('%s.real.UMAPonVAE.embedding.csv', bd));
+% fn_embed = fullfile(fd_save_base, bd, fd_vae, syl, sprintf('%s.%s.UMAPonVAE.embedding.csv', bd, vae_run));  % on VAE
+fn_embed = fullfile(fd_save_base, bd, fd_vae, syl, sprintf('%s.%s.embedding.csv', bd, vae_run));
+embed = readtable(fn_embed);
+% locate the spectrogram file
+fn_spec = fullfile(fd_save_base, bd, 'Spectrogram2', syl, sprintf('%s.%s.%s.h5', bd, syl, input_rn));
+disp(fn_spec);
+% plot embedding to double check
+alpha = 0.25;
+x = embed.umap1;
+y = embed.umap2;
+clusters = embed.hdbscan_cluster;
+% Create figure
+close all;
+fig = ZZfunc_newFigurePDFsize_v1([50 50 600 600]);
+hold on;
+% Plot noise cluster (-1) in grey
+mask_noise = clusters == -1;
+scatter(x(mask_noise), y(mask_noise), 10, 'filled', 'MarkerFaceColor', [0.5 0.5 0.5], 'MarkerEdgeColor', 'none', 'MarkerFaceAlpha', alpha, 'MarkerEdgeAlpha', alpha);
+% Plot other clusters
+valid_clusters = unique(clusters(clusters > -1));
+for i = 1:numel(valid_clusters)
+  cluster_id = valid_clusters(i);
+  color_idx = cluster_id + 1;  % 0 maps to 1st color
+  color = col_list{color_idx};
+  mask = clusters == cluster_id;
+  scatter(x(mask), y(mask), 5, 'filled', 'MarkerFaceColor', color, 'MarkerEdgeColor', 'none', 'MarkerFaceAlpha', alpha, 'MarkerEdgeAlpha', alpha);
+  % add cluster label
+  text(mean(x(mask)), mean(y(mask)), num2str(cluster_id), 'FontSize', 16);
+end
+% xlim([4 16]);
+% ylim([-1 13]);
+xlabel('UMAP1');
+ylabel('UMAP2');
+title(bd, 'FontSize', 16);
+fn_fig = fullfile(fd_save, sprintf('%s.embedding.pdf', bd));
+print(fig, fn_fig, '-dpdf', '-painters');
+close; 
+
+
+%% 2. Plot spectrograms
+close all;
+% a custom colormap for spectrogram
+n_colors = 256;             % Total number of colors in the colormap
+jet_map = jet(n_colors - 1);  % Get standard jet, but with one fewer row
+custom_map = [0 0 0; jet_map];  % Prepend black to jet
+% get the frequency list, assume same across all calls
+s = embed{1, 'spec_f'}{1};
+s = erase(s, {'[ ', ']'});
+s = split(s);
+freq = [];
+for i=1:(size(s,1)-1)
+  freq = [freq str2num(s{i})];
+end
+
+rng(1992);
+% loop through cluster ids
+% cid = 4;
+for cid = 0:max(embed.hdbscan_cluster)
+  idx = find(embed.hdbscan_cluster==cid);
+  % randomly sample
+  idx_rd = randsample(idx, 50);
+  fig_pos = [10 10 1300 950];
+  [fig, axes] = generatePanelGrid_v2(5, 10, [0.15;0.15;0.15;0.15;0.15], [0.02;0.02;0.02;0.02], [0.08;0.02], [0.1;0.05], 0.01, [0;0;0;0;0], fig_pos);
+  count = 0;
+  for ii=1:size(axes,1)
+    for jj=1:size(axes,2)
+      count = count+1;
+      ax = axes(ii,jj);
+      spec = h5read(fn_spec, '/spec_win_all', [1, 1, idx_rd(count)], [Inf, Inf, 1]);
+      imagesc(ax, 1:size(spec',1), freq, spec', [0, 1]);
+      set(ax, 'YDir', 'Normal');
+      colormap(custom_map);
+      if jj==1
+        set(ax, 'YDir', 'normal');
+        set(ax, 'YTick', [1000 3000 5000 7000]);
+        set(ax, 'YTickLabel', {'1k', '3k', '5k', '7k'}, 'FontSize', 10);
+      else
+        set(ax, 'YTick', []);
+      end
+      set(ax, 'XTick', []);
+      % show the HDBSCAN score
+      score = embed{idx_rd(count), 'hdbscan_prob'};
+      title(ax, sprintf('%d %.3f', idx_rd(count), score), 'FontSize', 8);
+
+    end
+  end
+  sgtitle(sprintf('Cluster %d', cid), 'FontSize', 16);
+  % save figure
+  fn_pdf = fullfile(fd_save, sprintf('%s.spect.cluster%d.pdf', bd, cid));
+  print(fig, fn_pdf, '-dpdf', '-painters');
+end
+
+
+%% 3. Create avereaged spectrogram: with time wrapping 
+% read sound directly from source nc file
+close all; 
+fs = 20000;
+% add a little before and after
+pad = 200;  % 10ms
+fig_pos = [100 100 1600 250];
+[fig, axes] = generatePanelGrid_v2(1, 10, [0.8], [], [0.08;0.02], [0.1;0.05], 0.02, [0], fig_pos);% loop through each cluster
+for cid = 0:max(embed.hdbscan_cluster)
+  ax = axes(cid+1);
+  idx = find(embed.hdbscan_cluster==cid);
+  % read sound data in
+  fns = embed.fn_wav;
+  istart = embed.istart;
+  iend = embed.iend; 
+  segs = {};
+  parfor ii=1:length(idx)
+    si = idx(ii);
+    fn = fns{si};
+    [sound, fs] = audioread(fn);
+    sound = ZZ_butterFilterFunc_v1(sound, fs, 250, 7500, 5);
+    i_start = max([1 istart(si)-pad]);
+    i_end = min([size(sound,1) iend(si)+pad]);
+    seg = sound(i_start:i_end);
+    segs{ii} = seg;
+  end
+  % align sound to the mean duration
+  lens = cellfun(@length, segs);
+  % Compute mean length
+  m = ceil(mean(lens));
+  spec_aligned = {};
+  parfor ii=1:size(segs,2)
+    n = length(segs{ii});
+    seg_aligned = interp1(linspace(1, n, n), segs{ii}, linspace(1, n, m), 'linear');
+    % calculate spectrogram
+    [power, powerRaw, powerGrey, S, f, t] = getAudioSpectrogramZZ_flexible_v1(seg_aligned, fs, 256, 256, 236, [250 7500], [10 21]);
+    spec_aligned{ii} = powerGrey/1024;  % normalize 
+  end
+  stacked_array = cat(3, spec_aligned{:});
+  spec_mean = mean(stacked_array, 3);
+  imagesc(ax, 1:size(spec_mean,1), freq, spec_mean);
+  set(ax, 'YDir', 'Normal');
+%   colormap(custom_map);
+  colormap jet;
+  set(ax, 'YDir', 'normal');
+  set(ax, 'YTick', [1000 3000 5000 7000]);
+  set(ax, 'YTickLabel', {'1k', '3k', '5k', '7k'}, 'FontSize', 10);
+  set(ax, 'XTick', []);
+  title(ax, sprintf('C%d: %d', cid, length(idx)));
+end
+% save to pdf
+fn_pdf = fullfile(fd_save, sprintf('%s.spect.MeanWrap.pdf', bd));
+print(fig, fn_pdf, '-dpdf', '-painters');
+
+
+%% 4. Create avereaged spectrogram: no time wrapping 
+% read entire specs array in
+specs = h5read(fn_spec, '/spec_win_all');
+% create a figure to plot averaged spectrogram
+% fig_pos = [50 50 800 500];
+% [fig, axes] = generatePanelGrid_v2(2, 5, [0.4; 0.4], [0.05], [0.08;0.02], [0.1;0.05], 0.05, [0;0], fig_pos);
+fig_pos = [100 100 1600 250];
+[fig, axes] = generatePanelGrid_v2(1, 10, [0.8], [], [0.08;0.02], [0.1;0.05], 0.02, [0], fig_pos);% loop through each cluster
+for cid = 0:max(embed.hdbscan_cluster)
+  ax = axes(cid+1);
+  idx = find(embed.hdbscan_cluster==cid);
+  spec_this = specs(:,:,idx);
+  spec_mean = mean(spec_this, 3);
+  imagesc(ax, 1:size(spec_mean',1), freq, spec_mean', [0, 1]);
+  set(ax, 'YDir', 'Normal');
+  colormap(custom_map);
+  set(ax, 'YDir', 'normal');
+  set(ax, 'YTick', [1000 3000 5000 7000]);
+  set(ax, 'YTickLabel', {'1k', '3k', '5k', '7k'}, 'FontSize', 10);
+  set(ax, 'XTick', []);
+  title(ax, sprintf('C%d: %d', cid, length(idx)));
+end
+% save to pdf
+fn_pdf = fullfile(fd_save, sprintf('%s.spect.Mean.pdf', bd));
+print(fig, fn_pdf, '-dpdf', '-painters');
+    
+
+
+
+
+
+

@@ -1,0 +1,132 @@
+% for neurons that are already sorted, manually pick a bunch similar
+% syllables, then align the spikes 
+% Zhilei Zhao, 02/19/2024
+
+clear; close all;
+addpath(genpath('/home/zz367/ProjectsU/EphysMONAO/Jupyter/MatlabCodes'));
+
+%% inputs
+fd_z4 = '/mnt/z4/';
+birdID = 'pair1CU21RigB';
+data_date = '2023-11-04'; ch = 8; sorted_range = [1:256];
+% data_date = '2023-11-08'; ch = 15; sorted_range = [1:36];
+
+fd_data_base = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'Analyzed', 'DbaseFiles', 'pair1', data_date, birdID, 'warble');
+fd_save_base = fullfile(fd_z4, 'zz367', 'EphysMONAO', 'Analyzed', 'Figures', 'pair1', data_date, birdID, 'warble');
+
+% is it a top spike (1) or bottom spike (2)
+spike_shape = 2; 
+% load the dbase with the manual annotations
+fn_dbase = fullfile(fd_data_base, sprintf('%s.%s.warble.labelZZ.dbase.mat', birdID, strrep(data_date,'-','')));
+load(fn_dbase); 
+d_anno = dbase; 
+% load the dbase with sorted spikes
+fn_dbase = fullfile(fd_data_base, sprintf('%s.%s.warble.chan%d.dbase.mat', birdID, strrep(data_date,'-',''), ch));
+load(fn_dbase); 
+d_ephys = dbase; 
+
+% where to save
+fd_save = fullfile(fd_save_base, 'chortle_picked');
+if ~exist(fd_save)
+  mkdir(fd_save)
+end
+
+
+%% extract sound data for the segments
+% where original NC files are saved, need to change the path format, since
+% sorting is done in Win 10, but analysis is in Ubuntu system
+nc_path = ZZ_winPathToLinux_v1(d_anno.PathName, 'Y:', '/mnt/z4');
+% loop through each file
+segments = [];
+seg_count = 0;
+% fi = 3;
+dbase = d_anno; 
+for fi=sorted_range
+  fn_audio = fullfile(nc_path, dbase.SoundFiles(fi).name);
+  audio = ncread(fn_audio, 'data');
+  audio = double(audio/10);  % divide by range of Intan AI, convert to double format
+  fs = dbase.Fs;
+  % loop through each segment
+  syl_time = dbase.SegmentTimes{1, fi};
+  syl_list = dbase.SegmentTitles{fi};
+  
+  for si=1:size(syl_time)
+    seg_count = seg_count+1;
+    segments(seg_count).title = syl_list{si};
+    segments(seg_count).title_str = sprintf('%d-%d-%d-%s', seg_count, fi, si, syl_list{si});
+    segments(seg_count).fn_audio = fn_audio;
+    segments(seg_count).seg_start = syl_time(si,1);
+    segments(seg_count).seg_end = syl_time(si,2);
+    segments(seg_count).fs = fs;
+    segments(seg_count).signalRaw = audio(segments(seg_count).seg_start : segments(seg_count).seg_end);
+    segments(seg_count).duration = length(segments(seg_count).signalRaw) / fs;
+    % band pass the signal
+    segments(seg_count).signalFiltered = ZZ_butterFilterFunc_v1(segments(seg_count).signalRaw, fs, 500, 10000, 2);
+    % normalize amplitude
+    segments(seg_count).signalNorm = audioNormalization_YW(segments(seg_count).signalFiltered, 0.25);
+    % calculate spectrogram
+    [power, powerRaw, powerGrey, S, f, t] = getAudioSpectrogramZZ_flexible_v1(segments(seg_count).signalFiltered, fs);
+    segments(seg_count).spec = powerGrey;
+    segments(seg_count).spec_colored = power;
+    segments(seg_count).spec_raw = powerRaw;
+    segments(seg_count).f = f;
+    segments(seg_count).t = t; 
+  end
+end
+
+
+%% select chortles based on manual labeling
+symbol = 'b';
+idx = find(strcmp({segments(:).title}, symbol));
+seg_selected = segments(idx);
+% plot and check 
+save_folder = fullfile(fd_save, 'chortle'); 
+maxDur = 1; 
+plotSpectrogramListZZ_flexible_v1(seg_selected, 'signalFiltered', 1, maxDur, 3, 10, save_folder, 'chortle', 'title_str', [500, 7500], [8, 20]);
+% save the extracted data
+fn_save = fullfile(save_folder, sprintf('%s_%s_chortle.mat', birdID, data_date));
+auto_calls = seg_selected;
+save(fn_save, 'auto_calls', '-v7.3');
+
+
+%% find the ephys trace and sorted spikes
+spike_all = d_ephys.EventTimes{1, 1};
+spike_selected =  d_ephys.EventIsSelected{1, 1}; % note that spikes may be manually excluded
+% go through selected syllables, find ephys and spiking data
+ephys_selected = seg_selected;
+for si=1:length(ephys_selected)
+%   si = 5; 
+  fn_ephys = strrep(ephys_selected(si).fn_audio, 'chan0', sprintf('chan%d', ch));
+  ephys = ncread(fn_ephys, 'data');
+  ephys_selected(si).e_trace = ephys(ephys_selected(si).seg_start:ephys_selected(si).seg_end); 
+  % find the spikes within the range
+  [a,b,c] = fileparts(ephys_selected(si).fn_audio);
+  f_idx = find(strcmp([b c], {d_ephys.SoundFiles.name})); 
+  % spikes need to pass threshold and not manually excluded
+  spike_pass = spike_all{spike_shape,f_idx};
+  spike_sel = spike_selected{spike_shape,f_idx};
+  spike_t = spike_pass(spike_sel==1);
+  spike_iv = zeros(size(ephys));  % indicator variable for spikes
+  spike_iv(spike_t) = 1; 
+  ephys_selected(si).spike_iv = spike_iv(ephys_selected(si).seg_start:ephys_selected(si).seg_end);
+end
+
+
+
+%% Manually pick some syllables, plot ephys voltage trace and sorted by number of spikes
+% sort by number of spikes
+ephys_this = ephys_selected; 
+num_spikes = cellfun(@sum, {ephys_this(:).spike_iv});
+[a, sort_i] = sort(num_spikes, 'descend');
+ephys_this = ephys_this(sort_i); 
+fd_save_this = fullfile(fd_save, 'p'); 
+prefix = sprintf("%s_chortle", birdID);
+plotSpectrogramListSpikes_v1(ephys_this, 'signalFiltered', 1, 1, 3, 5, fd_save_this, prefix, 'title_str', [500, 7500], [8, 20], 0.15); 
+% plot raw traces as well
+% FIR pass the raw trace
+for si=1:length(ephys_this)
+  ephys_this(si).e_trace_FIR = ZZ_FIRbandpass(double(ephys_this(si).e_trace), ephys_this(si).fs,  400, 9000, 80);
+end
+fd_save_this = fullfile(fd_save, 'p1_sep'); 
+plotSpectrogramListTraceSpikes_v2(ephys_this, 'signalFiltered', 1, 1, 2, 5, fd_save_this, prefix, 'title_str', [500, 7500], [8, 20], 0.16); 
+
